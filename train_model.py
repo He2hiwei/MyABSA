@@ -1,12 +1,14 @@
 import torch
 import torch.nn as nn 
+import torchtext.data as data
+import cnn_gate_aspect_model_atsa
+import cnn_gate_aspect_model_acsa
 import pandas as pd
 import numpy as np
 import json
 import re 
 import argparse
 from gensim import corpora
-from cnn_gate_aspect_model_acsa import CNN_Gate_Aspect_Text
 from torch.autograd import Variable
 from utils import glove 
 
@@ -35,129 +37,134 @@ parser.add_argument('-atsa', action='store_const', default='acsa', const='atsa',
 # dataset
 parser.add_argument('-hard', action='store_const', default='', const='_hard',help='use hard date [default: ""]')
 parser.add_argument('-large', action='store_const', default='-2014', const='-large',help='use large date [default: "-2014"]')
+parser.add_argument('-laptop', action='store_const', default='-restaurant', const='-laptop',help='use laptop data[default: "-restaurant"]')
+
 
 
 args = parser.parse_args()
+# temp
+# args.atsa = 'atsa'
+# args.hard = '_hard'
+# args.laptop = '-laptop'
 
 PROJECT_PATH = '/Users/apple/github/my-GCAE-master'
 Glove_PATH = '/Users/apple/AVEC2017/utils/datasets/glove.840B.300d.txt'
 
  ## data processing
-restaurant_train  = pd.read_json(PROJECT_PATH + '/acsa-restaurant' + args.large +'/acsa' + args.hard + '_train.json')
-restaurant_test  = pd.read_json(PROJECT_PATH + '/acsa-restaurant' + args.large +'/acsa' + args.hard + '_test.json')
-cnf_titile = 'acsa-restaurant' + args.large + args.hard
+if args.atsa == 'acsa':
+    train_json = json.load(open(PROJECT_PATH + '/acsa-restaurant' + args.large +'/acsa' + args.hard + '_train.json'))
+    test_json = json.load(open(PROJECT_PATH + '/acsa-restaurant' + args.large +'/acsa' + args.hard + '_test.json'))
+    cnf_titile = 'acsa-restaurant' + args.large + args.hard
+else:
+    train_json = json.load(open(PROJECT_PATH + '/atsa' + args.laptop+'/atsa' + args.hard + '_train.json'))
+    test_json = json.load(open(PROJECT_PATH + '/atsa' + args.laptop+'/atsa' + args.hard + '_test.json'))
+    cnf_titile = 'atsa' +  args.laptop + args.hard
+# restaurant_train  = pd.read_json(PROJECT_PATH + '/acsa-restaurant' + args.large +'/acsa' + args.hard + '_train.json')
+# restaurant_test  = pd.read_json(PROJECT_PATH + '/acsa-restaurant' + args.large +'/acsa' + args.hard + '_test.json')
 print("json data: " + cnf_titile + " is loaded")
 
 # ---------------
 from utils import absa_text2num
 import torch.utils.data as Data
 
-print('text is changing to numeric representation...')
-embed_lookup_tab, train_sentence, \
-train_aspect, train_senti, \
-test_sentence, test_aspect, \
-test_senti, senti_token2id_dict  = absa_text2num.absa_text2num(restaurant_train,restaurant_test, 
-                                                            Glove_PATH=Glove_PATH, EMBED_DIM=args.embed_dim)
-
-
-
-embed_lookup_tab_zero_pad = np.concatenate((embed_lookup_tab, np.zeros((1,args.embed_dim))),axis=0)
-
-# Convert list of lists with different lengths to a numpy array
-
-train_sentence_array = len(embed_lookup_tab) * (np.ones([len(train_sentence),
-                                       len(max(train_sentence + test_sentence,
-                                               key = lambda x: len(x)))]).astype(int))
-for i,j in enumerate(train_sentence):
-    train_sentence_array[i][0:len(j)] = j
-    
-test_sentence_array = len(embed_lookup_tab) * (np.ones([len(test_sentence),
-                                       len(max(train_sentence + test_sentence,
-                                               key = lambda x: len(x)))]).astype(int))
-for i,j in enumerate(test_sentence):
-    test_sentence_array[i][0:len(j)] = j
+train_dataset, test_dataset,\
+embed_lookup_ts, sm_itos = absa_text2num.absa_text2num_torchtext(train_json, test_json,args.unif, Glove_PATH, args.embed_dim)
 
 # parameter setting
-args.embed_num = len(embed_lookup_tab_zero_pad) + 1 # the last row is zero padding(TODO: require_grad=False)
-args.class_num = train_senti.max() + 1
-args.aspect_num = len(np.unique(train_aspect))
+args.embed_num = len(embed_lookup_ts)  # the last row is zero padding(TODO: require_grad=False)
+args.class_num = len(sm_itos)
+# args.aspect_num = len(np.unique(train_aspect))
 args.aspect_embed_dim =args.embed_dim
 
-args.embedding = torch.from_numpy(embed_lookup_tab_zero_pad) # embedding for sentence and aspect input
-#args.aspect_embedding = torch.from_numpy(aspect_glove_embeds)
+args.embedding = embed_lookup_ts # embedding for sentence and aspect input (torch.LongTensor)
 
 
 torch.manual_seed(args.seed)    # reproducible
 
+train_iter, train_all, test_all = data.Iterator.splits((train_dataset,train_dataset, test_dataset),batch_sizes=(args.batch_size,len(train_dataset), len(test_dataset)), 
+                                    repeat=False, sort_key=lambda x: len(x.text),shuffle=True)
 
-x = torch.linspace(0, len(train_sentence)-1, len(train_sentence)).int()    # this is index of x data (torch tensor)
-y = torch.linspace(0, len(train_sentence)-1, len(train_sentence)).int()      # this is index of y data (torch tensor)
+ABSA_model =  eval('cnn_gate_aspect_model_' + args.atsa + '.CNN_Gate_Aspect_Text(args)')
 
-torch_dataset = Data.TensorDataset(x, y)
-loader = Data.DataLoader(
-    dataset=torch_dataset,      # torch TensorDataset format
-    batch_size=args.batch_size,      # mini batch size
-    shuffle=True,               # random shuffle for training
-    num_workers=2,              # subprocesses for loading data
-)
-
-ACSA_model = CNN_Gate_Aspect_Text(args)
-
-optimizer = torch.optim.Adagrad(ACSA_model.parameters(), lr=1e-2, weight_decay=0, lr_decay=0)
+optimizer = torch.optim.Adagrad(ABSA_model.parameters(), lr=1e-2, weight_decay=0, lr_decay=0)
 loss_func = torch.nn.CrossEntropyLoss()  # the target label is NOT an one-hotted
 
-train_sentence_tensor = Variable(torch.from_numpy(train_sentence_array))
-train_aspect_tensor = Variable(torch.from_numpy(np.array(train_aspect)))
-
-test_sentence_tensor = Variable(torch.from_numpy(test_sentence_array))
-test_aspect_tensor = Variable(torch.from_numpy(np.array(test_aspect)))
-
 # ========================== print parameters ===========
-params = list(ACSA_model.parameters())
-k = 0
-for i in params:
-    l = 1
-    print("该层的结构：" + str(list(i.size())))
-    for j in i.size():
-        l *= j
-    print("该层参数和：" + str(l))
-    k = k + l
-print("总参数数量和：" + str(k))
+params = list(ABSA_model.parameters())
+# k = 0
+# for i in params:
+#     l = 1
+#     print("该层的结构：" + str(list(i.size())))
+#     for j in i.size():
+#         l *= j
+#     print("该层参数和：" + str(l))
+#     k = k + l
+# print("总参数数量和：" + str(k))
+
+def predict(model, Iterator_all):
+    for batch in Iterator_all:
+        # feature, aspect,targe: torch.LongTensor
+        feature, aspect, target = batch.text, batch.aspect, batch.sentiment
+
+        # transpose(batch firest) and change the variable: 
+        # batch_size x token_num(plus <pad>)
+        feature.data.t_()
+        aspect.data.t_()B
+
+        # index align
+        target.data.sub_(1)
+
+        pred = model(feature, aspect)
+
+    return pred, target
+
+
 
 train_acc_list = []
 test_acc_list = []
-for epoch in range(10):   # train entire dataset 3 times
-    for step, (batch_x, batch_y) in enumerate(loader):  # for each training step
-        pred = ACSA_model(train_sentence_tensor[batch_x],train_aspect_tensor[batch_x])
-        loss = loss_func(pred, Variable(train_senti[batch_y]))
+for epoch in range(args.epochs):   # train entire dataset 3 times
+    for step,batch in enumerate(train_iter):
+        # feature, aspect,targe: torch.LongTensor
+        feature, aspect, target = batch.text, batch.aspect, batch.sentiment
+
+        # transpose(batch firest) and change the variable: 
+        # batch_size x token_num(plus <pad>)
+        feature.data.t_()
+        aspect.data.t_()
+
+        # index align
+        target.data.sub_(1)
+
+        pred = ABSA_model(feature, aspect)
+        loss = loss_func(pred, target)
         
         optimizer.zero_grad()   # clear gradients for next train
         loss.backward()         # backpropagation, compute gradients
         optimizer.step()        # apply gradients
 
-        print('Epoch: ', epoch, '| Step: ', step, '| loss: ', loss.data[0])
+        # print('Epoch: ', epoch, '| Step: ', step, '| loss: ', loss.data[0])
     
-    print(15 * '=' + ' Accuracy for one epoch '+ 15 * '=')
-    train_pred = ACSA_model(train_sentence_tensor,train_aspect_tensor)
+    print(15 * '=' + ' Accuracy for ' + str(epoch) + ' th epoch '+ 15 * '=')
+    train_pred, train_target = predict(ABSA_model, train_all)
     train_pred = torch.max(train_pred, 1)[1]
-    train_acc = sum(train_senti.numpy() == train_pred.data.numpy()) / len(train_pred)
+    train_acc = sum(train_target.data.numpy() == train_pred.data.numpy()) / len(train_pred)
     train_acc_list.append(train_acc)
     print('Train acc: %.2f' % train_acc)
      
-    test_pred = ACSA_model(test_sentence_tensor,test_aspect_tensor)
+    test_pred, test_target = predict(ABSA_model, test_all)
     test_pred = torch.max(test_pred, 1)[1]
-    test_acc = sum(test_senti.numpy() == test_pred.data.numpy()) / len(test_pred)
+    test_acc = sum(test_target.data.numpy() == test_pred.data.numpy()) / len(test_pred)
     test_acc_list.append(test_acc)
     print('Test acc: %.2f' % test_acc)
     
 # save variable
 import pickle
 # Saving the objects:
-with open(cnf_titile + '_acc.pkl', 'wb') as f:  # Python 3: open(..., 'wb')
+with open('results_backup' + cnf_titile + '_acc.pkl', 'wb') as f:  # Python 3: open(..., 'wb')
     pickle.dump([test_acc_list,train_acc_list], f)
    
 # Getting back the objects:
-with open(cnf_titile + '_acc.pkl','rb') as f:  # Python 3: open(..., 'rb')
+with open('results_backup' + cnf_titile + '_acc.pkl','rb') as f:  # Python 3: open(..., 'rb')
     test_acc_list,train_acc_list = pickle.load(f)
 
 # Plot normalized confusion matrix
@@ -165,7 +172,7 @@ from sklearn.metrics import confusion_matrix
 import matplotlib.pyplot as plt
 import itertools
 
-cnf_matrix = confusion_matrix(test_senti.numpy(), test_pred.data.numpy())
+cnf_matrix = confusion_matrix(test_target.data.numpy(), test_pred.data.numpy())
 
 def plot_confusion_matrix(cm, classes,
                           normalize=False,
@@ -197,7 +204,7 @@ def plot_confusion_matrix(cm, classes,
     plt.xlabel('Predicted label')
     
 plt.figure(dpi=300)
-classes = [list(senti_token2id_dict.keys())[list(senti_token2id_dict.values()).index(i)] for i  in range(args.class_num)]
+classes = [sm_itos[i] for i in range(args.class_num)]
 #classes = ['Conflict','Negative','Neutral','Positive']
 plot_confusion_matrix(cnf_matrix, classes=classes, normalize=False,
                       title=cnf_titile)
@@ -223,5 +230,6 @@ ax.text(9,test_baseline,str(test_baseline))
 # y_ticks = np.append(ax.get_yticks(),test_baseline)
 # Set xtick locations to the values of the array `x_ticks`
 # ax.set_yticks(y_ticks)
-plt.savefig(cnf_titile + '_acc.png')
-plt.show(block=False)
+plt.savefig('results_pic/' + cnf_titile + '_acc.png')
+# plt.show(block=False)
+plt.show()

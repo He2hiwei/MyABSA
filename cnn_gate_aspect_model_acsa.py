@@ -22,11 +22,11 @@ class CNN_Gate_Aspect_Text(nn.Module):
 #        self.aspect_embed = nn.Embedding(A, args.aspect_embed_dim)
 #        self.aspect_embed.weight = nn.Parameter(args.aspect_embedding, requires_grad=True)
 
-        self.convs1 = nn.ModuleList([nn.Conv1d(D, Co, K) for K in Ks]).double()
-        self.convs2 = nn.ModuleList([nn.Conv1d(D, Co, K) for K in Ks]).double()
+        self.convs1 = nn.ModuleList([nn.Conv1d(D, Co, K) for K in Ks])
+        self.convs2 = nn.ModuleList([nn.Conv1d(D, Co, K) for K in Ks])
 
-        self.fc1 = nn.Linear(len(Ks)*Co, C).double()
-        self.fc_aspect = nn.Linear(args.aspect_embed_dim, Co).double()
+        self.fc1 = nn.Linear(len(Ks)*Co, C)
+        self.fc_aspect = nn.Linear(args.aspect_embed_dim, Co)
 
     def forward(self,feature,aspect):
 
@@ -34,11 +34,21 @@ class CNN_Gate_Aspect_Text(nn.Module):
 #        aspect_v = self.aspect_embed(aspect)  # (N,L')->(N, L', D)
         aspect_v = self.embed(aspect)  # (N,L')->(N, L', D)
         aspect_v = aspect_v.sum(1) / aspect_v.size(1) # (N,L',D) -> (N,D)
+        x, y = [], []
 
-        x = [F.tanh(conv(feature.transpose(1, 2))) for conv in self.convs1]  # [(N,Co,L), ...]*len(Ks)
-        y = [F.relu(conv(feature.transpose(1, 2)) + self.fc_aspect(aspect_v).unsqueeze(2)) for conv in self.convs2]
+        for conv in self.convs1:
+           try:
+               x.append(F.tanh(conv(feature.transpose(1, 2))))
+           except:
+               print(feature.shape)
+
+        for conv in self.convs2:
+           try:
+               y.append(F.relu(conv(feature.transpose(1, 2)) + self.fc_aspect(aspect_v).unsqueeze(2)))
+           except:
+               print(feature.shape)
+
         x = [i*j for i, j in zip(x, y)]
-
         # pooling method
         x0 = [F.max_pool1d(i, i.size(2)).squeeze(2) for i in x]  # [(N,Co), ...]*len(Ks)
         x0 = [i.view(i.size(0), -1) for i in x0]
